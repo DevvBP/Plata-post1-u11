@@ -1,123 +1,72 @@
 package com.universidad.cleancode.service;
 
+import com.universidad.cleancode.model.DatosBancarios;
+import com.universidad.cleancode.model.DatosEmpleado;
+import com.universidad.cleancode.model.Direccion;
+import com.universidad.cleancode.model.Dinero;
 import org.springframework.stereotype.Service;
 
-// TODO: este servicio creció demasiado, hay que partirlo en algún momento
+/**
+ * Orquesta el flujo de pago: valida, calcula y genera el comprobante.
+ * Cada responsabilidad está delegada a su clase correspondiente.
+ */
 @Service
 public class ProcesadorSalarialService {
 
-    // Constante de horas extra según convenio interno
-    private static final double VALOR_HORA_EXTRA = 15000.0;
-    private static final double UMBRAL_IMPUESTO_ALTO = 5000000.0;
+    private final ValidadorEmpleados   validador;
+    private final CalculadoraImpuestos calculadora;
 
-    /**
-     * Procesa el pago completo de un empleado. Hace validaciones, cálculos,
-     * formateo de dirección y simulación de envío bancario.
-     * Refactorizar cuando haya tiempo.
-     */
-    public String procesarPagoEmpleado(String nombre, String documento,
-                                        String calle, String ciudad, String codigoPostal,
+    public ProcesadorSalarialService(ValidadorEmpleados validador, CalculadoraImpuestos calculadora) {
+        this.validador    = validador;
+        this.calculadora  = calculadora;
+    }
+
+    public String procesarPagoEmpleado(DatosEmpleado empleado, Direccion direccion,
                                         double salarioBase, int horasExtras,
-                                        double porcentajeImpuesto, String numeroCuenta,
-                                        String banco) {
+                                        double porcentajeImpuesto, DatosBancarios datosBancarios) {
+        validar(empleado, salarioBase, horasExtras, porcentajeImpuesto);
 
-        // --- BLOQUE 1: Validaciones básicas ---
-        if (nombre == null || nombre.trim().isEmpty()) {
-            throw new IllegalArgumentException("El nombre no puede estar vacío");
-        }
-        if (documento == null || documento.trim().isEmpty()) {
-            throw new IllegalArgumentException("El documento es obligatorio");
-        }
-        if (documento.length() < 6 || documento.length() > 15) {
-            throw new IllegalArgumentException("Documento con longitud inválida: " + documento);
-        }
-        if (salarioBase <= 0) {
-            throw new IllegalArgumentException("El salario base debe ser positivo");
-        }
-        if (horasExtras < 0) {
-            throw new IllegalArgumentException("Las horas extras no pueden ser negativas");
-        }
-        if (porcentajeImpuesto < 0 || porcentajeImpuesto > 100) {
-            throw new IllegalArgumentException("Porcentaje de impuesto fuera de rango: " + porcentajeImpuesto);
-        }
-        if (numeroCuenta == null || numeroCuenta.trim().isEmpty()) {
-            throw new IllegalArgumentException("El número de cuenta bancaria es requerido");
-        }
-        if (banco == null || banco.trim().isEmpty()) {
-            throw new IllegalArgumentException("El banco no puede estar vacío");
-        }
-        if (calle == null || ciudad == null || codigoPostal == null) {
-            throw new IllegalArgumentException("La dirección está incompleta");
-        }
+        Dinero base      = new Dinero(salarioBase);
+        Dinero bruto     = calcularBruto(base, horasExtras);
+        Dinero deducciones = calculadora.aplicarDeducciones(bruto, porcentajeImpuesto);
+        Dinero neto      = bruto.restar(deducciones);
 
-        // --- BLOQUE 2: Cálculo de horas extras ---
-        double pagoHorasExtras = 0.0;
-        if (horasExtras > 0 && horasExtras <= 12) {
-            pagoHorasExtras = horasExtras * VALOR_HORA_EXTRA;
-        } else if (horasExtras > 12) {
-            // más de 12 horas: las primeras 12 a tarifa normal, el resto a tarifa doble
-            pagoHorasExtras = (12 * VALOR_HORA_EXTRA) + ((horasExtras - 12) * VALOR_HORA_EXTRA * 2);
-        }
+        return construirComprobante(empleado, direccion, base, horasExtras,
+                                    bruto, porcentajeImpuesto, deducciones, neto, datosBancarios);
+    }
 
-        // --- BLOQUE 3: Cálculo del bruto ---
-        double salarioBruto = salarioBase + pagoHorasExtras;
+    // --- Métodos privados extraídos (Extract Method) ---
 
-        // --- BLOQUE 4: Cálculo de impuestos (lógica anidada, difícil de seguir) ---
-        double montoImpuesto = 0.0;
-        if (salarioBruto > UMBRAL_IMPUESTO_ALTO) {
-            if (porcentajeImpuesto > 30) {
-                montoImpuesto = salarioBruto * (porcentajeImpuesto / 100.0) * 1.1; // recargo del 10%
-            } else {
-                montoImpuesto = salarioBruto * (porcentajeImpuesto / 100.0);
-            }
-        } else {
-            montoImpuesto = salarioBruto * (porcentajeImpuesto / 100.0) * 0.9; // descuento del 10%
-        }
+    private void validar(DatosEmpleado empleado, double salarioBase,
+                         int horasExtras, double porcentajeImpuesto) {
+        validador.validarDatosEmpleado(empleado);
+        validador.validarParametrosSalariales(salarioBase, horasExtras, porcentajeImpuesto);
+    }
 
-        // --- BLOQUE 5: Cálculo neto y deducciones de seguridad social ---
-        double seguridadSocial = salarioBase * 0.04;
-        double fondoPension = salarioBase * 0.04;
-        double salarioNeto = salarioBruto - montoImpuesto - seguridadSocial - fondoPension;
+    private Dinero calcularBruto(Dinero salarioBase, int horasExtras) {
+        Dinero extras = calculadora.calcularTotalHorasExtras(horasExtras);
+        return salarioBase.sumar(extras);
+    }
 
-        if (salarioNeto < 0) {
-            salarioNeto = 0; // nunca puede ser negativo
-        }
+    private String construirComprobante(DatosEmpleado empleado, Direccion direccion,
+                                         Dinero base, int horasExtras, Dinero bruto,
+                                         double porcentajeImpuesto, Dinero deducciones,
+                                         Dinero neto, DatosBancarios datosBancarios) {
+        Dinero extras          = calculadora.calcularTotalHorasExtras(horasExtras);
+        Dinero impuesto        = calculadora.calcularImpuesto(bruto, porcentajeImpuesto);
+        Dinero seguridadSocial = calculadora.calcularSeguridadSocial(base);
+        Dinero fondoPension    = calculadora.calcularFondoPension(base);
 
-        // --- BLOQUE 6: Formateo de dirección ---
-        String direccionFormateada = calle.trim().toUpperCase()
-                + ", " + ciudad.trim().toUpperCase()
-                + " - CP: " + codigoPostal.trim();
-
-        // --- BLOQUE 7: Construcción del resumen del empleado ---
-        String resumenEmpleado = "Empleado: " + nombre.trim().toUpperCase()
-                + " | Doc: " + documento
-                + " | Dirección: " + direccionFormateada;
-
-        // --- BLOQUE 8: Simulación de envío bancario ---
-        String resultadoBanco;
-        if (numeroCuenta.startsWith("0")) {
-            // cuentas de ahorro
-            resultadoBanco = "[BANCO:" + banco.toUpperCase() + "] Transferencia AHORRO → Cta:" + numeroCuenta;
-        } else if (numeroCuenta.startsWith("1") || numeroCuenta.startsWith("2")) {
-            // cuentas corrientes
-            resultadoBanco = "[BANCO:" + banco.toUpperCase() + "] Transferencia CORRIENTE → Cta:" + numeroCuenta;
-        } else {
-            resultadoBanco = "[BANCO:" + banco.toUpperCase() + "] Transferencia ESTÁNDAR → Cta:" + numeroCuenta;
-        }
-
-        // --- BLOQUE 9: Construcción del comprobante final ---
-        String comprobante = "=== COMPROBANTE DE PAGO ===" + "\n"
-                + resumenEmpleado + "\n"
-                + "Salario Base: $" + String.format("%.2f", salarioBase) + "\n"
-                + "Horas Extras (" + horasExtras + "h): $" + String.format("%.2f", pagoHorasExtras) + "\n"
-                + "Salario Bruto: $" + String.format("%.2f", salarioBruto) + "\n"
-                + "Impuesto (" + porcentajeImpuesto + "%): -$" + String.format("%.2f", montoImpuesto) + "\n"
-                + "Seguridad Social (4%): -$" + String.format("%.2f", seguridadSocial) + "\n"
-                + "Fondo Pensión (4%): -$" + String.format("%.2f", fondoPension) + "\n"
-                + "SALARIO NETO: $" + String.format("%.2f", salarioNeto) + "\n"
-                + resultadoBanco + "\n"
+        return "=== COMPROBANTE DE PAGO ===" + "\n"
+                + empleado.resumen() + " | Dirección: " + direccion.formatear() + "\n"
+                + "Salario Base: "               + base.formatear()            + "\n"
+                + "Horas Extras (" + horasExtras + "h): " + extras.formatear() + "\n"
+                + "Salario Bruto: "              + bruto.formatear()           + "\n"
+                + "Impuesto (" + porcentajeImpuesto + "%): -" + impuesto.formatear()              + "\n"
+                + "Seguridad Social (4%): -"     + seguridadSocial.formatear() + "\n"
+                + "Fondo Pensión (4%): -"        + fondoPension.formatear()    + "\n"
+                + "SALARIO NETO: "               + neto.formatear()            + "\n"
+                + datosBancarios.descripcionTransferencia()                    + "\n"
                 + "=========================";
-
-        return comprobante;
     }
 }
